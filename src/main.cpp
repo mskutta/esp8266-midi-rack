@@ -4,10 +4,31 @@
   #define ISR_PREFIX
 #endif
 
+#if !(defined(ESP_NAME))
+  #define ESP_NAME "midi" 
+#endif
+
 #include <Arduino.h>
+
+// WiFi
+#include <ESP8266WiFi.h>
+char hostname[32] = {0};
+
+// WiFi Manager
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h> 
 
 // I2C
 #include <Wire.h>
+
+// MIDI
+#include <MIDI.h>
+#include <AppleMIDI.h>
+#include <WiFiClient.h>
+#include <WiFiUdp.h>
+APPLEMIDI_CREATE_DEFAULTSESSION_INSTANCE();
+int8_t isConnected = 0;
 
 // Display (SSD1306)
 #include "SSD1306Ascii.h"
@@ -36,6 +57,16 @@ unsigned long ledTimeout = 0;
 /* Serial */
 char text[40] = {0};
 
+void configModeCallback (WiFiManager *myWiFiManager) {
+  Serial.println(F("Config Mode"));
+  Serial.println(WiFi.softAPIP());
+  Serial.println(myWiFiManager->getConfigPortalSSID());
+
+  oled.println(F("Config Mode"));
+  oled.println(WiFi.softAPIP());
+  oled.println(myWiFiManager->getConfigPortalSSID());
+}
+
 void setup() {
   /* LED */
   pinMode(LED_BUILTIN, OUTPUT);
@@ -55,6 +86,61 @@ void setup() {
 
   oled.println(F("Setup..."));
 
+  /* WiFi */
+  sprintf(hostname, "%s-%06X", ESP_NAME, ESP.getChipId());
+  WiFiManager wifiManager;
+  wifiManager.setAPCallback(configModeCallback);
+  if(!wifiManager.autoConnect(hostname)) {
+    Serial.println("WiFi Connect Failed");
+    oled.println(F("WiFi Connect Failed"));
+    //reset and try again, or maybe put it to deep sleep
+    ESP.reset();
+    delay(1000);
+  } 
+
+  Serial.println(hostname);
+  Serial.print(F("  "));
+  Serial.print(WiFi.localIP());
+  Serial.print(F("  "));
+  Serial.println(WiFi.macAddress());
+
+  oled.println(hostname);
+  oled.print(F("  "));
+  oled.print(WiFi.localIP());
+  oled.print(F("  "));
+  oled.println(WiFi.macAddress());
+
+  /* Apple MIDI */
+  Serial.println(F("AppleMIDI:"));
+  Serial.print(F("  name: "));
+  Serial.println(AppleMIDI.getName());
+  Serial.print(F("  port: "));
+  Serial.println(AppleMIDI.getPort());
+
+  oled.println(F("AppleMIDI:"));
+  oled.print(F("  name: "));
+  oled.println(AppleMIDI.getName());
+  oled.print(F("  port: "));
+  oled.println(AppleMIDI.getPort());
+
+  MIDI.begin();
+
+  AppleMIDI.setHandleConnected([](const APPLEMIDI_NAMESPACE::ssrc_t & ssrc, const char* name) {
+    isConnected++;
+    AM_DBG(F("Connected to session"), ssrc, name);
+    Serial.println(F("Connected:"));
+    Serial.print(F("  "));
+    Serial.println(ssrc);
+    Serial.print(F("  "));
+    Serial.println(name);
+  });
+  AppleMIDI.setHandleDisconnected([](const APPLEMIDI_NAMESPACE::ssrc_t & ssrc) {
+    isConnected--;
+    Serial.println(F("Disconnected:"));
+    Serial.print(F("  "));
+    Serial.println(ssrc);
+  });
+
   /* Port Expander (MCP23008) */
   if (!mcp.begin_I2C()) {
     Serial.println("MCP I2C Error.");
@@ -69,6 +155,14 @@ void setup() {
   mcp.pinMode(5, INPUT_PULLUP);
   mcp.pinMode(6, INPUT_PULLUP);
   mcp.pinMode(7, INPUT_PULLUP);
+
+  // Set initial pin state
+  for(int i = 0; i < PIN_COUNT; i++) {
+    pinState = mcp.digitalRead(pins[i]);
+    if (pinState != lastPinState[i]) {
+      lastPinState[i] = pinState;
+    }
+  }
 
   /* LED */
   digitalWrite(LED_BUILTIN, HIGH);
@@ -85,9 +179,13 @@ void setup() {
   col[0] = oled.fieldWidth(strlen("01: "));
   col[1] = oled.fieldWidth(strlen("01: 9999   02: "));
   rows = oled.fontRows();
+
+  /* MIDI */
+  MIDI.begin(1);
 }
 
 void loop() {
+  MIDI.read();
 
   unsigned long currentMillis = millis();
 
@@ -110,9 +208,15 @@ void loop() {
       if (pinState == HIGH) {
         Serial.println(F(" HIGH"));
         oled.print(F("HIGH"));
+        if (isConnected > 0) {
+          MIDI.sendNoteOn(1 + i, 64, 1);
+        }
       } else {
         Serial.println(F(" LOW"));
         oled.print(F("LOW"));
+        if (isConnected > 0) {
+          MIDI.sendNoteOff(1 + i, 64, 1);
+        }
       }
     }
   }
