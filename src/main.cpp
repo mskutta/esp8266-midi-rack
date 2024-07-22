@@ -5,39 +5,41 @@
 #endif
 
 #if !(defined(ESP_NAME))
-  #define ESP_NAME "midi" 
+  #define ESP_NAME "rack" 
 #endif
 
 #include <Arduino.h>
 
-// WiFi
+/* WiFi */
 #include <ESP8266WiFi.h>
+#include <ArduinoOTA.h> // Updates over the air
 char hostname[32] = {0};
 
-// WiFi Manager
+/* mDNS */
+#include <ESP8266mDNS.h>
+
+/* WiFi Manager */
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h> 
 
-// I2C
+/* I2C */
 #include <Wire.h>
 
-// MIDI
-#include <MIDI.h>
-#include <AppleMIDI.h>
-#include <WiFiClient.h>
-#include <WiFiUdp.h>
-APPLEMIDI_CREATE_DEFAULTSESSION_INSTANCE();
-int8_t isConnected = 0;
+/* MQTT */
+#include <PubSubClient.h>
+char topic[40] = {0};
+WiFiClient wifiClient;
+PubSubClient client(wifiClient);
 
-// Display (SSD1306)
+/* Display (SSD1306) */
 #include "SSD1306Ascii.h"
 #include "SSD1306AsciiWire.h"
-SSD1306AsciiWire oled;
+SSD1306AsciiWire display;
 uint8_t col[2]; // Columns for counts.
 uint8_t rows;   // Rows per line.
 
-// Port Expander (MCP23008)
+/* Port Expander (MCP23008) */
 #include <Adafruit_MCP23X08.h>
 Adafruit_MCP23X08 mcp;
 
@@ -62,9 +64,21 @@ void configModeCallback (WiFiManager *myWiFiManager) {
   Serial.println(WiFi.softAPIP());
   Serial.println(myWiFiManager->getConfigPortalSSID());
 
-  oled.println(F("Config Mode"));
-  oled.println(WiFi.softAPIP());
-  oled.println(myWiFiManager->getConfigPortalSSID());
+  display.println(F("Config Mode"));
+  display.println(WiFi.softAPIP());
+  display.println(myWiFiManager->getConfigPortalSSID());
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.println("MQTT Connecting...");
+    if (client.connect(hostname)) {
+      Serial.println("MQTT connected");
+    } else {
+      Serial.print(".");
+      delay(1000);
+    }
+  }
 }
 
 void setup() {
@@ -79,12 +93,13 @@ void setup() {
   delay(1000);
 
   /* Display */
-  oled.begin(&Adafruit128x64, 0x3C);  // initialize with the I2C addr 0x3C (for the 128x64)
-  oled.setFont(System5x7);
-  oled.setScrollMode(SCROLL_MODE_AUTO);
-  oled.clear();
+  display.begin(&Adafruit128x64, 0x3C);  // initialize with the I2C addr 0x3C (for the 128x64)
+  display.setFont(System5x7);
+  display.setScrollMode(SCROLL_MODE_AUTO);
+  display.clear();
 
-  oled.println(F("Setup..."));
+  Serial.println(F("Setup..."));
+  display.println(F("Setup..."));
 
   /* WiFi */
   sprintf(hostname, "%s-%06X", ESP_NAME, ESP.getChipId());
@@ -92,7 +107,7 @@ void setup() {
   wifiManager.setAPCallback(configModeCallback);
   if(!wifiManager.autoConnect(hostname)) {
     Serial.println("WiFi Connect Failed");
-    oled.println(F("WiFi Connect Failed"));
+    display.println(F("WiFi Connect Failed"));
     //reset and try again, or maybe put it to deep sleep
     ESP.reset();
     delay(1000);
@@ -104,44 +119,99 @@ void setup() {
   Serial.print(F("  "));
   Serial.println(WiFi.macAddress());
 
-  oled.println(hostname);
-  oled.print(F("  "));
-  oled.print(WiFi.localIP());
-  oled.print(F("  "));
-  oled.println(WiFi.macAddress());
+  display.println(hostname);
+  display.print(F("  "));
+  display.print(WiFi.localIP());
+  display.print(F("  "));
+  display.println(WiFi.macAddress());
 
-  /* Apple MIDI */
-  Serial.println(F("AppleMIDI:"));
-  Serial.print(F("  name: "));
-  Serial.println(AppleMIDI.getName());
-  Serial.print(F("  port: "));
-  Serial.println(AppleMIDI.getPort());
+  /* OTA */
+  ArduinoOTA.setHostname(hostname);
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_SPIFFS
+      type = "filesystem";
+    }
 
-  oled.println(F("AppleMIDI:"));
-  oled.print(F("  name: "));
-  oled.println(AppleMIDI.getName());
-  oled.print(F("  port: "));
-  oled.println(AppleMIDI.getPort());
-
-  MIDI.begin();
-
-  AppleMIDI.setHandleConnected([](const APPLEMIDI_NAMESPACE::ssrc_t & ssrc, const char* name) {
-    isConnected++;
-    AM_DBG(F("Connected to session"), ssrc, name);
-    Serial.println(F("Connected:"));
-    Serial.print(F("  "));
-    Serial.println(ssrc);
-    Serial.print(F("  "));
-    Serial.println(name);
+    // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+    Serial.println("Start updating " + type);
+    display.println("Start updating " + type);
   });
-  AppleMIDI.setHandleDisconnected([](const APPLEMIDI_NAMESPACE::ssrc_t & ssrc) {
-    isConnected--;
-    Serial.println(F("Disconnected:"));
-    Serial.print(F("  "));
-    Serial.println(ssrc);
+  ArduinoOTA.onEnd([]() {
+    Serial.println(F("\nEnd"));
+    display.println(F("\nEnd"));
   });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    display.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    display.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) { 
+      Serial.println(F("Auth Failed")); 
+      display.println(F("Auth Failed"));
+    }
+    else if (error == OTA_BEGIN_ERROR) { 
+      Serial.println(F("Begin Failed")); 
+      display.println(F("Begin Failed")); 
+    }
+    else if (error == OTA_CONNECT_ERROR) { 
+      Serial.println(F("Connect Failed")); 
+      display.println(F("Connect Failed"));
+    }
+    else if (error == OTA_RECEIVE_ERROR) { 
+      Serial.println(F("Receive Failed"));
+      display.println(F("Receive Failed"));
+    } 
+    else if (error == OTA_END_ERROR) { 
+      Serial.println(F("End Failed")); 
+      display.println(F("End Failed")); 
+    }
+  });
+  ArduinoOTA.begin();
 
-  /* Port Expander (MCP23008) */
+  // Handled by ArduinoOTA
+  // /* mDNS */
+  // while (!MDNS.begin(hostname)) {
+  //   delay(1000);
+  //   Serial.println(F("mDNS Responder Failed"));
+  //   display.println(F("mDNS Responder Failed"));
+  //   ArduinoOTA.handle();
+  // }
+  // Serial.println(F("mDNS Responder Started"));
+  // display.println(F("mDNS Responder Started"));
+
+  // // Wait for mDNS responder to initialize
+  // delay(1000);
+
+  /* MQTT */
+
+  // Discover MQTT broker via mDNS
+  while (MDNS.queryService("mqtt", "tcp") == 0) {
+    delay(1000);
+    Serial.println(F("Finding MQTT Server"));
+    display.println(F("Finding MQTT Server"));
+    ArduinoOTA.handle();
+  }
+
+  Serial.println(F("MQTT: "));
+  Serial.print(F("  "));
+  Serial.print(MDNS.IP(0));
+  Serial.print(F(":"));
+  Serial.println(MDNS.port(0));
+
+  display.println(F("MQTT: "));
+  display.print(F("  "));
+  display.print(MDNS.IP(0));
+  display.print(F(":"));
+  display.println(MDNS.port(0));
+
+  client.setServer(MDNS.IP(0), MDNS.port(0));
+
+  /* Pins */
   if (!mcp.begin_I2C()) {
     Serial.println("MCP I2C Error.");
     while (1);
@@ -164,28 +234,36 @@ void setup() {
     }
   }
 
+  /* Form */
+  display.setScrollMode(SCROLL_MODE_OFF);
+  display.clear();
+
+  display.println("01: 9999   02: 9999");
+  display.println("03: 9999   04: 9999");
+  display.println("05: 9999   06: 9999");
+  display.println("07: 9999   08: 9999");
+
+  col[0] = display.fieldWidth(strlen("01: "));
+  col[1] = display.fieldWidth(strlen("01: 9999   02: "));
+  rows = display.fontRows();
+
   /* LED */
   digitalWrite(LED_BUILTIN, HIGH);
-
-  oled.setScrollMode(SCROLL_MODE_OFF);
-  oled.clear();
-
-  /* Form */
-  oled.println("01: 9999   02: 9999");
-  oled.println("03: 9999   04: 9999");
-  oled.println("05: 9999   06: 9999");
-  oled.println("07: 9999   08: 9999");
-
-  col[0] = oled.fieldWidth(strlen("01: "));
-  col[1] = oled.fieldWidth(strlen("01: 9999   02: "));
-  rows = oled.fontRows();
-
-  /* MIDI */
-  MIDI.begin(1);
 }
 
 void loop() {
-  MIDI.read();
+  /* OTA */
+  ArduinoOTA.handle();
+
+  /* MQTT */
+  if (!client.connected())
+  {
+    reconnect();
+  }
+  client.loop();
+
+  /* mDNS */
+  MDNS.update();
 
   unsigned long currentMillis = millis();
 
@@ -202,21 +280,17 @@ void loop() {
     if (pinState != lastPinState[i]) {
       lastPinState[i] = pinState;
       stateChanged = true;
-      sprintf(text, "%d", i + 1);
-      Serial.print(text);
-      oled.clearField(col[i%2], rows*(i/2), 4);    
+      sprintf(topic, "%s/sensor%02d", hostname, i + 1);
+      Serial.print(topic);
+      display.clearField(col[i%2], rows*(i/2), 4);    
       if (pinState == HIGH) {
+        client.publish(topic, "1");
         Serial.println(F(" HIGH"));
-        oled.print(F("HIGH"));
-        if (isConnected > 0) {
-          MIDI.sendNoteOn(1 + i, 64, 1);
-        }
+        display.print(F("HIGH"));
       } else {
+        client.publish(topic, "0");
         Serial.println(F(" LOW"));
-        oled.print(F("LOW"));
-        if (isConnected > 0) {
-          MIDI.sendNoteOff(1 + i, 64, 1);
-        }
+        display.print(F("LOW"));
       }
     }
   }
