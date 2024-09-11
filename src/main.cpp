@@ -11,7 +11,7 @@
 #include <Arduino.h>
 
 /* WiFi */
-#include <ESP8266WiFi.h>
+#include <ESP8266WiFi.h> // WIFI support
 #include <ArduinoOTA.h> // Updates over the air
 char hostname[32] = {0};
 
@@ -47,9 +47,11 @@ Adafruit_MCP23X08 mcp;
 #define PIN_COUNT 8
 int pins[PIN_COUNT] = {0, 1, 2, 3, 4, 5, 6, 7};
 int pinState;
+int initPinState[PIN_COUNT] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
 int lastPinState[PIN_COUNT] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
+int pinTrigger[PIN_COUNT] = {0, 0, 0, 0, 0, 0, 0, 0};
 unsigned long pinTimeout[PIN_COUNT] = {0, 0, 0, 0, 0, 0, 0, 0};
-unsigned long activeTimeout[PIN_COUNT] = {0, 0, 0, 0, 0, 0, 0};
+unsigned long activeTimeout[PIN_COUNT] = {0, 0, 0, 0, 0, 0, 0, 0};
 
 /* LED State */
 bool stateChanged = false;
@@ -70,12 +72,18 @@ void configModeCallback (WiFiManager *myWiFiManager) {
 }
 
 void reconnect() {
+  Serial.print("MQTT Connecting");
+  display.print("MQTT Connecting");
   while (!client.connected()) {
-    Serial.println("MQTT Connecting...");
     if (client.connect(hostname)) {
+      Serial.println();
       Serial.println("MQTT connected");
+
+      display.println();
+      display.println("MQTT connected");
     } else {
       Serial.print(".");
+      display.print(".");
       delay(1000);
     }
   }
@@ -106,7 +114,7 @@ void setup() {
   WiFiManager wifiManager;
   wifiManager.setAPCallback(configModeCallback);
   if(!wifiManager.autoConnect(hostname)) {
-    Serial.println("WiFi Connect Failed");
+    Serial.println(F("WiFi Connect Failed"));
     display.println(F("WiFi Connect Failed"));
     //reset and try again, or maybe put it to deep sleep
     ESP.reset();
@@ -115,15 +123,17 @@ void setup() {
 
   Serial.println(hostname);
   Serial.print(F("  "));
-  Serial.print(WiFi.localIP());
+  Serial.println(WiFi.localIP());
   Serial.print(F("  "));
   Serial.println(WiFi.macAddress());
 
   display.println(hostname);
   display.print(F("  "));
-  display.print(WiFi.localIP());
+  display.println(WiFi.localIP());
   display.print(F("  "));
   display.println(WiFi.macAddress());
+
+  delay(5000);
 
   /* OTA */
   ArduinoOTA.setHostname(hostname);
@@ -190,12 +200,16 @@ void setup() {
   /* MQTT */
 
   // Discover MQTT broker via mDNS
+  Serial.print(F("Finding MQTT Server"));
+  display.print(F("Finding MQTT Server"));
   while (MDNS.queryService("mqtt", "tcp") == 0) {
     delay(1000);
-    Serial.println(F("Finding MQTT Server"));
-    display.println(F("Finding MQTT Server"));
+    Serial.print(F("."));
+    display.print(F("."));
     ArduinoOTA.handle();
   }
+  Serial.println();
+  display.println();
 
   Serial.println(F("MQTT: "));
   Serial.print(F("  "));
@@ -210,6 +224,13 @@ void setup() {
   display.println(MDNS.port(0));
 
   client.setServer(MDNS.IP(0), MDNS.port(0));
+
+  if (!client.connected())
+  {
+    reconnect();
+  }
+
+  delay(5000);
 
   /* Pins */
   if (!mcp.begin_I2C()) {
@@ -229,22 +250,21 @@ void setup() {
   // Set initial pin state
   for(int i = 0; i < PIN_COUNT; i++) {
     pinState = mcp.digitalRead(pins[i]);
-    if (pinState != lastPinState[i]) {
-      lastPinState[i] = pinState;
-    }
+    initPinState[i] = pinState;
+    lastPinState[i] = pinState;
   }
 
   /* Form */
   display.setScrollMode(SCROLL_MODE_OFF);
   display.clear();
 
-  display.println("01: 9999   02: 9999");
-  display.println("03: 9999   04: 9999");
-  display.println("05: 9999   06: 9999");
-  display.println("07: 9999   08: 9999");
+  display.println(" 1:    0    2:    0");
+  display.println(" 3:    0    4:    0");
+  display.println(" 5:    0    6:    0");
+  display.println(" 7:    0    8:    0");
 
-  col[0] = display.fieldWidth(strlen("01: "));
-  col[1] = display.fieldWidth(strlen("01: 9999   02: "));
+  col[0] = display.fieldWidth(strlen("00: "));
+  col[1] = display.fieldWidth(strlen("00: 0000   00: "));
   rows = display.fontRows();
 
   /* LED */
@@ -282,15 +302,29 @@ void loop() {
       stateChanged = true;
       sprintf(topic, "%s/sensor%02d", hostname, i + 1);
       Serial.print(topic);
-      display.clearField(col[i%2], rows*(i/2), 4);    
-      if (pinState == HIGH) {
-        client.publish(topic, "1");
-        Serial.println(F(" HIGH"));
-        display.print(F("HIGH"));
-      } else {
+      
+      char buffer [4];
+      display.clearField(col[i%2], rows*(i/2), 4);
+
+      if (pinState == initPinState[i]) {
         client.publish(topic, "0");
+
+        sprintf (buffer, "%4d", pinTrigger[i]);
+        display.print(buffer);
+      } else {
+        client.publish(topic, "1");
+
+        pinTrigger[i]++;
+        sprintf (buffer, "%4d", pinTrigger[i]);
+        display.setInvertMode(true);
+        display.print(buffer);
+        display.setInvertMode(false);
+      }
+
+      if (pinState == HIGH) {
+        Serial.println(F(" HIGH"));
+      } else {
         Serial.println(F(" LOW"));
-        display.print(F("LOW"));
       }
     }
   }
