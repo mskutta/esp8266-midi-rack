@@ -224,6 +224,7 @@ void setup() {
   display.println(MDNS.port(0));
 
   client.setServer(MDNS.IP(0), MDNS.port(0));
+  client.setKeepAlive(60);
 
   if (!client.connected())
   {
